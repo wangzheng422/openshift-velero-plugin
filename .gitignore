@@ -1,3 +1,7 @@
 .go/
 _output/
 .idea/
+
+.ansible
+
+.vscode
