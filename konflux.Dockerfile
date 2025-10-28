@@ -19,8 +19,8 @@ COPY LICENSE /licenses/
 USER 65534:65534
 ENTRYPOINT ["/bin/bash", "-c", "cp /plugins/* /target/."]
 
-LABEL description="OpenShift API for Data Protection - Velero Plugin"
-LABEL io.k8s.description="OpenShift API for Data Protection - Velero Plugin"
-LABEL io.k8s.display-name="OADP Velero Plugin"
+LABEL description="wzhlab.top - Velero Plugin - csi volume handler mapping"
+LABEL io.k8s.description="wzhlab.top - Velero Plugin - csi volume handler mapping"
+LABEL io.k8s.display-name="OADP Velero Plugin - csi volume handler mapping"
 LABEL io.openshift.tags="migration"
-LABEL summary="OpenShift API for Data Protection - Velero Plugin"
+LABEL summary="wzhlab.top - Velero Plugin - csi volume handler mapping"
