@@ -16,7 +16,7 @@ BINS = $(wildcard velero-*)
 
 REPO ?= github.com/konveyor/openshift-velero-plugin
 
-BUILD_IMAGE ?= openshift/origin-release:golang-1.14
+BUILD_IMAGE ?= docker.io/openshift/origin-release:golang-1.14
 
 IMAGE ?= docker.io/konveyor/openshift-velero-plugin
 
