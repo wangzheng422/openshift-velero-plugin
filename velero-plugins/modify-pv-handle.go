@@ -2,13 +2,15 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"regexp"
+	"sort"
+	"strings"
 
 	"github.com/sirupsen/logrus"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -25,9 +27,14 @@ type ModifyVolumeHandleAction struct {
 const (
 	configMapName      = "velero-plugin-regex-map"
 	veleroNamespaceEnv = "VELERO_NAMESPACE"
-	findKey            = "regex.find"
-	replaceKey         = "regex.replace"
 )
+
+// ReplacementRule defines a single replacement operation
+type ReplacementRule struct {
+	Path    string
+	Find    string
+	Replace string
+}
 
 // NewModifyVolumeHandleAction (constructor)
 // We need to re-add the Kubernetes client initialization
@@ -56,9 +63,9 @@ func (p *ModifyVolumeHandleAction) AppliesTo() (velero.ResourceSelector, error) 
 
 // Execute is the core logic
 func (p *ModifyVolumeHandleAction) Execute(input *velero.RestoreItemActionExecuteInput) (*velero.RestoreItemActionExecuteOutput, error) {
-	p.Log.Info("Starting ModifyVolumeHandleAction (ConfigMap Regex) for PV...")
+	p.Log.Info("Starting ModifyPVFieldsAction for PV...")
 
-	// 1. Get the ConfigMap with regex patterns
+	// 1. Get the ConfigMap with regex rules
 	namespace := os.Getenv(veleroNamespaceEnv)
 	if namespace == "" {
 		namespace = "velero" // Default
@@ -66,61 +73,119 @@ func (p *ModifyVolumeHandleAction) Execute(input *velero.RestoreItemActionExecut
 
 	cm, err := p.k8sClient.CoreV1().ConfigMaps(namespace).Get(context.TODO(), configMapName, metav1.GetOptions{})
 	if err != nil {
-		p.Log.Errorf("Failed to get ConfigMap %s: %v. Skipping regex replacement.", configMapName, err)
-		// If map doesn't exist, just return the item unmodified
+		p.Log.Errorf("Failed to get ConfigMap %s: %v. Skipping modifications.", configMapName, err)
 		return velero.NewRestoreItemActionExecuteOutput(input.Item), nil
 	}
 
-	// 2. Get the find and replace strings from the ConfigMap
-	findPattern, okFind := cm.Data[findKey]
-	replacePattern, okReplace := cm.Data[replaceKey]
-
-	if !okFind || !okReplace {
-		p.Log.Warnf("ConfigMap %s is missing '%s' or '%s' keys. Skipping regex replacement.", configMapName, findKey, replaceKey)
+	// 2. Parse rules from the ConfigMap
+	rules := p.parseRulesFromConfigMap(cm.Data)
+	if len(rules) == 0 {
+		p.Log.Warnf("No valid rules found in ConfigMap %s. Skipping modifications.", configMapName)
 		return velero.NewRestoreItemActionExecuteOutput(input.Item), nil
 	}
 
-	// 3. Compile the regex
-	searchRegex, err := regexp.Compile(findPattern)
-	if err != nil {
-		p.Log.Errorf("Invalid 'regex.find' pattern in ConfigMap: %v. Skipping.", err)
+	// 3. Get the unstructured content of the PV
+	pv, ok := input.Item.UnstructuredContent()["spec"].(map[string]interface{})
+	if !ok {
+		p.Log.Warn("Could not cast PV spec to map[string]interface{}. Skipping.")
 		return velero.NewRestoreItemActionExecuteOutput(input.Item), nil
 	}
+	pvName := input.Item.UnstructuredContent()["metadata"].(map[string]interface{})["name"].(string)
 
-	// 4. Convert item to a PersistentVolume
-	pv := new(corev1.PersistentVolume)
-	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(input.Item.UnstructuredContent(), pv); err != nil {
-		return nil, err
-	}
+	// 4. Iterate through rules and apply them
+	modified := false
+	for _, rule := range rules {
+		p.Log.Infof("Applying rule for path: %s", rule.Path)
+		pathParts := strings.Split(rule.Path, ".")
 
-	// 5. Skip if not a CSI volume or handle is empty
-	if pv.Spec.CSI == nil {
-		p.Log.Info("Skipping PV: not a CSI volume.")
-		return velero.NewRestoreItemActionExecuteOutput(input.Item), nil
-	}
-	oldHandle := pv.Spec.CSI.VolumeHandle
-	if oldHandle == "" {
-		p.Log.Info("Skipping PV: CSI VolumeHandle is empty.")
-		return velero.NewRestoreItemActionExecuteOutput(input.Item), nil
-	}
-
-	// 6. Perform the replacement
-	if searchRegex.MatchString(oldHandle) {
-		newHandle := searchRegex.ReplaceAllString(oldHandle, replacePattern)
-
-		p.Log.Infof("Regex match found in PV %s: changing VolumeHandle from '%s' to '%s'", pv.Name, oldHandle, newHandle)
-		pv.Spec.CSI.VolumeHandle = newHandle
-
-		// 7. Convert modified PV back to Unstructured
-		newItem, err := runtime.DefaultUnstructuredConverter.ToUnstructured(pv)
-		if err != nil {
-			return nil, err
+		// We are working within the 'spec' field, so remove it if present
+		if len(pathParts) > 0 && pathParts[0] == "spec" {
+			pathParts = pathParts[1:]
 		}
-		input.Item.SetUnstructuredContent(newItem)
 
-		return velero.NewRestoreItemActionExecuteOutput(input.Item), nil
+		currentVal, found, err := unstructured.NestedString(pv, pathParts...)
+		if err != nil {
+			p.Log.Errorf("Error accessing path %s for PV %s: %v. Skipping rule.", rule.Path, pvName, err)
+			continue
+		}
+		if !found {
+			p.Log.Warnf("Path %s not found for PV %s. Skipping rule.", rule.Path, pvName)
+			continue
+		}
+
+		// Compile regex for the current rule
+		searchRegex, err := regexp.Compile(rule.Find)
+		if err != nil {
+			p.Log.Errorf("Invalid 'find' pattern for path %s: %v. Skipping rule.", rule.Path, err)
+			continue
+		}
+
+		// Perform replacement
+		if searchRegex.MatchString(currentVal) {
+			newVal := searchRegex.ReplaceAllString(currentVal, rule.Replace)
+			p.Log.Infof("PV %s: Match found for path %s. Changing from '%s' to '%s'", pvName, rule.Path, currentVal, newVal)
+
+			if err := unstructured.SetNestedField(pv, newVal, pathParts...); err != nil {
+				p.Log.Errorf("Error setting path %s for PV %s: %v. Skipping rule.", rule.Path, pvName, err)
+				continue
+			}
+			modified = true
+		} else {
+			p.Log.Infof("PV %s: No regex match for path %s on value '%s'.", pvName, rule.Path, currentVal)
+		}
 	}
 
-	p.Log.Infof("Regex pattern not found in VolumeHandle: '%s'. Restoring as-is.", oldHandle)
+	if modified {
+		p.Log.Infof("PV %s was modified.", pvName)
+	} else {
+		p.Log.Infof("PV %s was not modified.", pvName)
+	}
+
 	return velero.NewRestoreItemActionExecuteOutput(input.Item), nil
+}
+
+// parseRulesFromConfigMap extracts and sorts rules from ConfigMap data
+func (p *ModifyVolumeHandleAction) parseRulesFromConfigMap(data map[string]string) []ReplacementRule {
+	rulesMap := make(map[string]ReplacementRule)
+
+	for key, value := range data {
+		parts := strings.Split(key, ".")
+		if len(parts) != 2 {
+			continue // Expecting format like "rule1.path"
+		}
+		ruleID := parts[0]
+		attr := parts[1]
+
+		rule := rulesMap[ruleID]
+		switch attr {
+		case "path":
+			rule.Path = value
+		case "find":
+			rule.Find = value
+		case "replace":
+			rule.Replace = value
+		}
+		rulesMap[ruleID] = rule
+	}
+
+	var rules []ReplacementRule
+	for _, rule := range rulesMap {
+		if rule.Path != "" && rule.Find != "" { // 'replace' can be empty
+			rules = append(rules, rule)
+		} else {
+			p.Log.Warnf("Incomplete rule found, skipping. A valid rule must have 'path' and 'find' keys. Found: path=%s, find=%s", rule.Path, rule.Find)
+		}
+	}
+
+	// Sort rules by key (rule1, rule2, etc.) to ensure consistent order
+	sort.Slice(rules, func(i, j int) bool {
+		// Extract numeric part of the rule ID for proper sorting
+		id_i := -1
+		fmt.Sscanf(rules[i].Path, "rule%d", &id_i)
+		id_j := -1
+		fmt.Sscanf(rules[j].Path, "rule%d", &id_j)
+		return id_i < id_j
+	})
+
+	return rules
 }
