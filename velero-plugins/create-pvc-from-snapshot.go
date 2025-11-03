@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"time"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v7/apis/volumesnapshot/v1"
 	"github.com/sirupsen/logrus"
@@ -13,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -113,6 +115,42 @@ func (p *CreatePvcFromSnapshotAction) Execute(item runtime.Unstructured, backup 
 	}
 
 	p.Log.Infof("Successfully created new PVC %s/%s.", newPvc.Namespace, newPvc.Name)
+
+	// Wait for the PVC to be bound before adding it to the backup
+	p.Log.Infof("Waiting for PVC %s/%s to become bound...", newPvc.Namespace, newPvc.Name)
+	const (
+		pvcBindTimeout  = 5 * time.Minute
+		pvcPollInterval = 5 * time.Second
+	)
+
+	// Using PollUntilContextTimeout instead of the deprecated PollImmediate.
+	// The context passed to the polling function will be used for the k8s API call.
+	err = wait.PollUntilContextTimeout(context.Background(), pvcPollInterval, pvcBindTimeout, true, func(ctx context.Context) (bool, error) {
+		pvc, err := p.k8sClient.CoreV1().PersistentVolumeClaims(newPvc.Namespace).Get(ctx, newPvc.Name, metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				p.Log.Warnf("PVC %s/%s not found while waiting for it to be bound. It may have been deleted.", newPvc.Namespace, newPvc.Name)
+				// Return a terminal error to stop polling.
+				return false, err
+			}
+			// For other errors, log it and continue polling.
+			p.Log.Warnf("Error getting PVC %s/%s while waiting for it to be bound: %v", newPvc.Namespace, newPvc.Name, err)
+			return false, nil
+		}
+
+		if pvc.Status.Phase == corev1.ClaimBound {
+			p.Log.Infof("PVC %s/%s is now bound.", newPvc.Namespace, newPvc.Name)
+			return true, nil
+		}
+
+		p.Log.Infof("PVC %s/%s is still in phase %s, waiting...", newPvc.Namespace, newPvc.Name, pvc.Status.Phase)
+		return false, nil
+	})
+
+	if err != nil {
+		p.Log.Errorf("Error waiting for PVC %s/%s to be bound: %v", newPvc.Namespace, newPvc.Name, err)
+		return item, nil, nil
+	}
 
 	// 5. Add the new PVC to the list of items to be backed up
 	additionalItem := velero.ResourceIdentifier{
