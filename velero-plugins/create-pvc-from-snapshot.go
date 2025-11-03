@@ -81,7 +81,7 @@ func (p *CreatePvcFromSnapshotAction) Execute(item runtime.Unstructured, backup 
 	}
 
 	// 3. Define the new PVC to be created
-	newPvcName := fmt.Sprintf("%s-restored-%s", snap.Name, backup.Name)
+	newPvcName := fmt.Sprintf("%s-%s", sourcePvcName, snap.Name)
 	apiGroup := "snapshot.storage.k8s.io"
 	newPvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
