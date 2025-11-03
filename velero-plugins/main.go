@@ -6,6 +6,6 @@ import (
 
 func main() {
 	veleroplugin.NewServer().
-		RegisterRestoreItemAction("wzhlab.top/modify-csi-volume-handle-action", NewModifyVolumeHandleAction).
+		RegisterBackupItemAction("wzhlab.top/create-pvc-from-snapshot-action", NewCreatePvcFromSnapshotAction).
 		Serve()
 }
