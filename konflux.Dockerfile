@@ -6,7 +6,7 @@ COPY . $APP_ROOT/src/github.com/konveyor/openshift-velero-plugin
 WORKDIR $APP_ROOT/src/github.com/konveyor/openshift-velero-plugin
 ENV GOPATH=$APP_ROOT
 ENV BUILDTAGS containers_image_ostree_stub exclude_graphdriver_devicemapper exclude_graphdriver_btrfs containers_image_openpgp exclude_graphdriver_overlay include_gcs include_oss strictfipsruntime
-ENV BIN velero-plugins
+ENV BIN velero-plugins-wzhlab-top-pv-patch
 ENV GOEXPERIMENT strictfipsruntime
 RUN go build -installsuffix "static" -tags "$BUILDTAGS" -mod=mod -o _output/$BIN ./$BIN
 
