@@ -109,8 +109,16 @@ func (p *CreatePvcFromSnapshotAction) Execute(item runtime.Unstructured, backup 
 	// 4. Create the new PVC in the cluster
 	_, err = p.k8sClient.CoreV1().PersistentVolumeClaims(newPvc.Namespace).Create(context.TODO(), newPvc, metav1.CreateOptions{})
 	if err != nil {
+		// If the PVC already exists, log it as info and return immediately, skipping the rest of the logic.
+		// This is considered a success condition for this plugin's purpose.
+		if errors.IsAlreadyExists(err) {
+			p.Log.Infof("PVC %s/%s already exists, skipping.", newPvc.Namespace, newPvc.Name)
+			return item, nil, nil
+		}
+
+		// For any other error, log it and also return, skipping the rest of the logic.
 		p.Log.Errorf("Failed to create new PVC %s/%s: %v", newPvc.Namespace, newPvc.Name, err)
-		// Don't fail the whole backup for this item, just log the error and continue
+		// Don't fail the whole backup for this item, just log the error and continue.
 		return item, nil, nil
 	}
 
